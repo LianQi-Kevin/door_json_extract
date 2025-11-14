@@ -10,3 +10,5 @@ safetensors @ https://xly-devops.cdn.bcebos.com/safetensors-nightly/safetensors-
 # others
 numpy
 requests
+pymupdf
+urllib3

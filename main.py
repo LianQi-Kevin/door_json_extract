@@ -1,24 +1,15 @@
 import json
 import os
-from typing import Union
-import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
+from typing import Union, Optional
+from dataclasses import dataclass
 
-from paddleocr import PaddleOCRVL
 import numpy as np
+import pymupdf
+from paddleocr import PaddleOCRVL
 
-# PaddleOCR-VL
-print("Loading PaddleOCR-VL pipeline...")
-PADDLE_OCR_VL_PIPELINE = PaddleOCRVL(
-    # 版面区域检测排序模型
-    layout_detection_model_name="PP-DocLayoutV2",
-    # layout_detection_model_dir=r"./paddle_models/PP-DocLayoutV2",
-    # 多模态识别模型
-    vl_rec_model_name="PaddleOCR-VL-0.9B",
-    # vl_rec_model_dir=r"./paddle_models/PaddleOCR-VL",
-    # 推理设备
-    device="gpu:0",
-)
-print("PaddleOCR-VL pipeline loaded.")
+from requests_tools import post_with_retry
 
 # CHAT-GLM 配置
 GLM_API_KEY: str = r"your-api-key"
@@ -26,14 +17,42 @@ CHAT_COMPLETIONS_URL: str = "https://open.bigmodel.cn/api/paas/v4/chat/completio
 MODEL_NAME: str = "glm-4-plus"
 
 
-# def paddle_ocr_vl_example(detection: Union[np.ndarray, str, list[Union[np.ndarray, str]]]) -> Union[str, list[str]]:
-def paddle_ocr_vl_example(detection: Union[np.ndarray, str]) -> str:
-    global PADDLE_OCR_VL_PIPELINE
+# cache data
+@dataclass
+class cacheData:
+    pdf_path: str
+    array: np.ndarray = None
+    markdown_text: str = None
+    extracted_json: dict = None
+
+
+CACHE_DATA_DICT: dict[str, cacheData] = {}
+
+# thread lock
+LOCK_1 = threading.Lock()
+
+
+# def paddle_ocr_vl(detection: Union[np.ndarray, str, list[Union[np.ndarray, str]]]) -> Union[str, list[str]]:
+def paddle_ocr_vl(detection: Union[np.ndarray, str]) -> str:
+    paddle_ocr_vl_pipeline = PaddleOCRVL(
+        # 版面区域检测排序模型
+        layout_detection_model_name="PP-DocLayoutV2",
+        # layout_detection_model_dir=r"./paddle_models/PP-DocLayoutV2",
+        # 多模态识别模型
+        vl_rec_model_name="PaddleOCR-VL-0.9B",
+        # vl_rec_model_dir=r"./paddle_models/PaddleOCR-VL",
+        # vl_rec_backend="vllm-server",  # remote vl inference server
+        # vl_rec_server_url="https://your.deploy.server:port/v1",  # remote vl inference server url
+        # vl_rec_max_concurrency=8,
+        # 推理设备
+        device="gpu:0",
+    )
+
     # return [r.markdown for r in PADDLE_OCR_VL_PIPELINE.predict(detection, use_queues=True)]
-    return [r.markdown for r in PADDLE_OCR_VL_PIPELINE.predict(detection, use_queues=True)][0]
+    return [r.markdown for r in paddle_ocr_vl_pipeline.predict(detection, use_queues=True)][0]
 
 
-def big_model_completions(markdown_text: str):
+def big_model_completions(markdown_text: str) -> dict:
     global GLM_API_KEY, CHAT_COMPLETIONS_URL, MODEL_NAME
     # 定义要提取的JSON schema
     json_schema: dict = {
@@ -109,15 +128,110 @@ def big_model_completions(markdown_text: str):
         "Authorization": f"Bearer {GLM_API_KEY}"
     }
 
-    response = requests.post(CHAT_COMPLETIONS_URL, data=json.dumps(payload, ensure_ascii=False), headers=headers,
-                             proxies=None)
+    response = post_with_retry(CHAT_COMPLETIONS_URL, data=json.dumps(payload, ensure_ascii=False), headers=headers,
+                               proxies=None)
     response.raise_for_status()
 
     content: str = response.json()["choices"][0]["message"]["content"]
-    print(json.loads(content))  # 解析并输出JSON对象
+    return json.loads(content)  # 解析并输出JSON对象
+
+
+def pdf_process_main(pdf_path: str,
+                     roi_shape: tuple[tuple[float, float], tuple[float, float]] = ((0.0, 0.0), (1.0, 1.0)),
+                     dpi: int = 300, temp_png_path: Optional[str] = None) -> np.ndarray:
+    """
+    load pdf and export png
+
+    :param pdf_path: pdf file path
+    :param roi_shape: roi shape in normalized coordinates ((x0, y0), (x1, y1))
+    :param dpi: export png dpi
+    :param temp_png_path: temporary png file path
+    :return: cropped png array
+    """
+
+    # load pdf and get pdf shape
+    pdf = pymupdf.open(pdf_path)
+    page = pdf.load_page(0)
+
+    # calculate rotation
+    rotate_deg = 0
+    width, height = page.rect.width, page.rect.height
+    if width < height:
+        rotate_deg = -90
+
+    # zoom and calculate pixmap
+    page.set_rotation(rotation=rotate_deg)  # reset rotation
+
+    # use roi calculate crop rect
+    width, height = page.rect.width, page.rect.height
+    x0, y0 = roi_shape[0]
+    x1, y1 = roi_shape[1]
+    print(
+        f"PDF page size: width={width}, height={height}, crop rect=({x0 * width}, {y0 * height}, {x1 * width}, {y1 * height})")
+
+    # export to matrix
+    pix = page.get_pixmap(
+        matrix=pymupdf.Matrix(dpi / 72, dpi / 72), alpha=False,
+        clip=pymupdf.Rect(x0 * width, y0 * height, x1 * width, y1 * height))
+
+    if temp_png_path:
+        pix.save(temp_png_path)
+
+    pdf.close()
+
+    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+
+
+def multi_thread_main(cache_data_key: str):
+    global CACHE_DATA_DICT
+    try:
+        with LOCK_1:
+            cache_data = CACHE_DATA_DICT[cache_data_key]
+        print(f"[THREAD] Start processing: {cache_data_key}", flush=True)
+
+        markdown_text: str = paddle_ocr_vl(detection=cache_data.array)
+        print(f"[THREAD] OCR done for {cache_data_key}:\n{markdown_text}", flush=True)
+
+        dumped_json: dict = big_model_completions(markdown_text=markdown_text)
+        print(f"[THREAD] JSON done for {cache_data_key}:\n{dumped_json}", flush=True)
+
+        with LOCK_1:
+            CACHE_DATA_DICT[cache_data_key].markdown_text = markdown_text
+            CACHE_DATA_DICT[cache_data_key].extracted_json = dumped_json
+
+    except Exception as e:
+        # 把异常打出来，结合 main 里的 fut.result() 更好定位
+        print(f"[THREAD-ERROR] key={cache_data_key}, error={repr(e)}", flush=True)
+        raise
 
 
 if __name__ == '__main__':
-    for img_path in os.listdir("./test_img"):
-        if img_path.endswith(".png"):
-            big_model_completions(markdown_text=paddle_ocr_vl_example(detection=os.path.join("./test_img", img_path)))
+    pdf_folder: str = r"your/pdf/path"
+
+    import time
+
+    st_time = time.time()
+
+    # preprocess pdf to cache data (pymupdf not support multi-thread)
+    for file_path in os.listdir(pdf_folder):
+        if file_path.endswith(".pdf") and "FHM" in file_path:
+            full_pdf_path = os.path.join(pdf_folder, file_path)
+            print(f"Caching PDF: {full_pdf_path}")
+            corp_array: np.ndarray = pdf_process_main(
+                pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)),
+                temp_png_path=f"./test_img/{os.path.splitext(os.path.basename(full_pdf_path))[0]}.png")
+            CACHE_DATA_DICT[file_path] = cacheData(pdf_path=full_pdf_path, array=corp_array)
+
+    # 构造线程池
+    # pool = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) * 5))
+    pool = ThreadPoolExecutor(max_workers=2)
+    all_tasks = []
+
+    for cache_key in CACHE_DATA_DICT.keys():
+        all_tasks.append(pool.submit(multi_thread_main, cache_key))
+
+    # 等待所有任务完成
+    wait(all_tasks, return_when=ALL_COMPLETED)
+    pool.shutdown()
+
+    print(f"Total processing time: {time.time() - st_time} seconds")
