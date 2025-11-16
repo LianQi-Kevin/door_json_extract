@@ -1,15 +1,18 @@
+import base64
 import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
-from typing import Union, Optional
+from typing import Optional
 from dataclasses import dataclass
 
-import numpy as np
 import pymupdf
-from paddleocr import PaddleOCRVL
 
 from requests_tools import post_with_retry
+
+
+# PaddleOCR-VL 配置
+PADDLE_OCR_VL_DEPLOY_URL: str = r"http://your-paddle-ocr-vl-deploy-url:port"
 
 # CHAT-GLM 配置
 GLM_API_KEY: str = r"your-api-key"
@@ -21,7 +24,7 @@ MODEL_NAME: str = "glm-4-plus"
 @dataclass
 class cacheData:
     pdf_path: str
-    array: np.ndarray = None
+    base64: str = None
     markdown_text: str = None
     extracted_json: dict = None
 
@@ -32,24 +35,22 @@ CACHE_DATA_DICT: dict[str, cacheData] = {}
 LOCK_1 = threading.Lock()
 
 
-# def paddle_ocr_vl(detection: Union[np.ndarray, str, list[Union[np.ndarray, str]]]) -> Union[str, list[str]]:
-def paddle_ocr_vl(detection: Union[np.ndarray, str]) -> str:
-    paddle_ocr_vl_pipeline = PaddleOCRVL(
-        # 版面区域检测排序模型
-        layout_detection_model_name="PP-DocLayoutV2",
-        # layout_detection_model_dir=r"./paddle_models/PP-DocLayoutV2",
-        # 多模态识别模型
-        vl_rec_model_name="PaddleOCR-VL-0.9B",
-        # vl_rec_model_dir=r"./paddle_models/PaddleOCR-VL",
-        # vl_rec_backend="vllm-server",  # remote vl inference server
-        # vl_rec_server_url="https://your.deploy.server:port/v1",  # remote vl inference server url
-        # vl_rec_max_concurrency=8,
-        # 推理设备
-        device="gpu:0",
+def paddle_ocr_vl(detection: str) -> str:
+    global PADDLE_OCR_VL_DEPLOY_URL
+    response = post_with_retry(
+        url=f"{PADDLE_OCR_VL_DEPLOY_URL}/layout-parsing",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps({
+            "file": detection,
+            "fileType": 1,
+            "visualize": False,
+            "prettifyMarkdown": False,
+            "useLayoutDetection": True,
+            "promptLabel": "table"
+        }, ensure_ascii=False),
     )
-
-    # return [r.markdown for r in PADDLE_OCR_VL_PIPELINE.predict(detection, use_queues=True)]
-    return [r.markdown for r in paddle_ocr_vl_pipeline.predict(detection, use_queues=True)][0]
+    response.raise_for_status()
+    return response.json()["result"]["layoutParsingResults"][0]["markdown"]["text"]
 
 
 def big_model_completions(markdown_text: str) -> dict:
@@ -138,7 +139,7 @@ def big_model_completions(markdown_text: str) -> dict:
 
 def pdf_process_main(pdf_path: str,
                      roi_shape: tuple[tuple[float, float], tuple[float, float]] = ((0.0, 0.0), (1.0, 1.0)),
-                     dpi: int = 300, temp_png_path: Optional[str] = None) -> np.ndarray:
+                     dpi: int = 300, temp_png_path: Optional[str] = None) -> str:
     """
     load pdf and export png
 
@@ -146,7 +147,7 @@ def pdf_process_main(pdf_path: str,
     :param roi_shape: roi shape in normalized coordinates ((x0, y0), (x1, y1))
     :param dpi: export png dpi
     :param temp_png_path: temporary png file path
-    :return: cropped png array
+    :return: cropped png base64
     """
 
     # load pdf and get pdf shape
@@ -179,7 +180,7 @@ def pdf_process_main(pdf_path: str,
 
     pdf.close()
 
-    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    return base64.b64encode(pix.tobytes("png")).decode('utf-8')
 
 
 def multi_thread_main(cache_data_key: str):
@@ -189,7 +190,7 @@ def multi_thread_main(cache_data_key: str):
             cache_data = CACHE_DATA_DICT[cache_data_key]
         print(f"[THREAD] Start processing: {cache_data_key}", flush=True)
 
-        markdown_text: str = paddle_ocr_vl(detection=cache_data.array)
+        markdown_text: str = paddle_ocr_vl(detection=cache_data.base64)
         print(f"[THREAD] OCR done for {cache_data_key}:\n{markdown_text}", flush=True)
 
         dumped_json: dict = big_model_completions(markdown_text=markdown_text)
@@ -217,14 +218,13 @@ if __name__ == '__main__':
         if file_path.endswith(".pdf") and "FHM" in file_path:
             full_pdf_path = os.path.join(pdf_folder, file_path)
             print(f"Caching PDF: {full_pdf_path}")
-            corp_array: np.ndarray = pdf_process_main(
+            corp_base64: str = pdf_process_main(
                 pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)),
                 temp_png_path=f"./test_img/{os.path.splitext(os.path.basename(full_pdf_path))[0]}.png")
-            CACHE_DATA_DICT[file_path] = cacheData(pdf_path=full_pdf_path, array=corp_array)
+            CACHE_DATA_DICT[file_path] = cacheData(pdf_path=full_pdf_path, base64=corp_base64)
 
     # 构造线程池
-    # pool = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) * 5))
-    pool = ThreadPoolExecutor(max_workers=2)
+    pool = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) * 5))
     all_tasks = []
 
     for cache_key in CACHE_DATA_DICT.keys():

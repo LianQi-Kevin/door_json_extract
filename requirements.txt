@@ -1,14 +1,6 @@
 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# PaddleOCR
---extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/    # cuda 12.9
-# --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/      # cuda 12.6
-paddlepaddle-gpu==3.2.1
-paddleocr[doc-parser]
-safetensors @ https://xly-devops.cdn.bcebos.com/safetensors-nightly/safetensors-0.6.2.dev0-cp38-abi3-win_amd64.whl
-
 # others
-numpy
 requests
 pymupdf
 urllib3
