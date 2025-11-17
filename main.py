@@ -7,6 +7,8 @@ from typing import Optional
 from dataclasses import dataclass
 
 import pymupdf
+import openpyxl
+from openpyxl.styles.builtins import styles
 
 from requests_tools import post_with_retry
 
@@ -24,9 +26,9 @@ MODEL_NAME: str = "glm-4-plus"
 @dataclass
 class cacheData:
     pdf_path: str
-    base64: str = None
-    markdown_text: str = None
-    extracted_json: dict = None
+    base64: Optional[str] = None
+    markdown_text: Optional[str] = None
+    extracted_json: Optional[dict] = None
 
 
 CACHE_DATA_DICT: dict[str, cacheData] = {}
@@ -50,7 +52,11 @@ def paddle_ocr_vl(detection: str) -> str:
         }, ensure_ascii=False),
     )
     response.raise_for_status()
-    return response.json()["result"]["layoutParsingResults"][0]["markdown"]["text"]
+    data = response.json()
+    try:
+        return data["result"]["layoutParsingResults"][0]["markdown"]["text"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"PaddleOCR-VL返回结构异常: {data}") from e
 
 
 def big_model_completions(markdown_text: str) -> dict:
@@ -68,7 +74,7 @@ def big_model_completions(markdown_text: str) -> dict:
         "玻璃": "",
         "门框密封条": "",
         "门扇密封条": "",
-        "五金配置组名称": "HW-01",
+        "五金配置组名称": "",
         "五金配置": [
             {"名称": "", "品牌": "", "型号": "", "数量": 0}
         ],
@@ -120,7 +126,8 @@ def big_model_completions(markdown_text: str) -> dict:
             {"role": "system", "content": system_template},
             {"role": "user", "content": user_prompt},
         ],
-        # "temperature": 0,
+        "temperature": 0,
+        "do_sample": False,
         "response_format": {"type": "json_object"}
     }
 
@@ -134,7 +141,10 @@ def big_model_completions(markdown_text: str) -> dict:
     response.raise_for_status()
 
     content: str = response.json()["choices"][0]["message"]["content"]
-    return json.loads(content)  # 解析并输出JSON对象
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"GLM 返回内容非合法 JSON: {content}") from e
 
 
 def pdf_process_main(pdf_path: str,
@@ -171,9 +181,10 @@ def pdf_process_main(pdf_path: str,
         f"PDF page size: width={width}, height={height}, crop rect=({x0 * width}, {y0 * height}, {x1 * width}, {y1 * height})")
 
     # export to matrix
-    pix = page.get_pixmap(
-        matrix=pymupdf.Matrix(dpi / 72, dpi / 72), alpha=False,
-        clip=pymupdf.Rect(x0 * width, y0 * height, x1 * width, y1 * height))
+    clip = pymupdf.Rect(x0 * width, y0 * height, x1 * width, y1 * height)
+    clip &= page.rect  # 与 page.rect 取交集
+
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(dpi / 72, dpi / 72), alpha=False, clip=clip)
 
     if temp_png_path:
         pix.save(temp_png_path)
@@ -183,55 +194,137 @@ def pdf_process_main(pdf_path: str,
     return base64.b64encode(pix.tobytes("png")).decode('utf-8')
 
 
-def multi_thread_main(cache_data_key: str):
+def multi_thread_main(cache_key: str, cache_data: cacheData):
     global CACHE_DATA_DICT
     try:
-        with LOCK_1:
-            cache_data = CACHE_DATA_DICT[cache_data_key]
-        print(f"[THREAD] Start processing: {cache_data_key}", flush=True)
+        print(f"[THREAD] Start processing: {cache_key}", flush=True)
 
         markdown_text: str = paddle_ocr_vl(detection=cache_data.base64)
-        print(f"[THREAD] OCR done for {cache_data_key}:\n{markdown_text}", flush=True)
-
         dumped_json: dict = big_model_completions(markdown_text=markdown_text)
-        print(f"[THREAD] JSON done for {cache_data_key}:\n{dumped_json}", flush=True)
+        print(f"[THREAD] JSON done for {cache_key}:\n{dumped_json}", flush=True)
 
         with LOCK_1:
-            CACHE_DATA_DICT[cache_data_key].markdown_text = markdown_text
-            CACHE_DATA_DICT[cache_data_key].extracted_json = dumped_json
+            CACHE_DATA_DICT[cache_key].markdown_text = markdown_text
+            CACHE_DATA_DICT[cache_key].extracted_json = dumped_json
 
     except Exception as e:
-        # 把异常打出来，结合 main 里的 fut.result() 更好定位
-        print(f"[THREAD-ERROR] key={cache_data_key}, error={repr(e)}", flush=True)
-        raise
+        print(f"[THREAD-ERROR] key={cache_key}, error={repr(e)}", flush=True)
+        with LOCK_1:
+            CACHE_DATA_DICT[cache_key].extracted_json = {}
 
 
 if __name__ == '__main__':
     pdf_folder: str = r"your/pdf/path"
 
-    import time
+    wb = openpyxl.Workbook()
 
-    st_time = time.time()
+    for dir_path in os.listdir(drawing_folder):
+        full_dir_path: str = os.path.join(drawing_folder, dir_path, "pdf")
+        if os.path.isdir(full_dir_path):
+            output_json_path: str = os.path.join(f"./cache_json", f"{dir_path}_extracted_fhm_data.json")
+            os.makedirs("./cache_json", exist_ok=True)
 
-    # preprocess pdf to cache data (pymupdf not support multi-thread)
-    for file_path in os.listdir(pdf_folder):
-        if file_path.endswith(".pdf") and "FHM" in file_path:
-            full_pdf_path = os.path.join(pdf_folder, file_path)
-            print(f"Caching PDF: {full_pdf_path}")
-            corp_base64: str = pdf_process_main(
-                pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)),
-                temp_png_path=f"./test_img/{os.path.splitext(os.path.basename(full_pdf_path))[0]}.png")
-            CACHE_DATA_DICT[file_path] = cacheData(pdf_path=full_pdf_path, base64=corp_base64)
+            # process each sub-folder
+            CACHE_DATA_DICT.clear()
+            print(f"Processing folder: {full_dir_path}")
 
-    # 构造线程池
-    pool = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) * 5))
-    all_tasks = []
+            # create cache data
+            os.makedirs(f"./test_img/{dir_path}", exist_ok=True)
 
-    for cache_key in CACHE_DATA_DICT.keys():
-        all_tasks.append(pool.submit(multi_thread_main, cache_key))
+            # preprocess pdf to cache data (pymupdf not support multi-thread)
+            for file_path in os.listdir(full_dir_path):
+                if file_path.endswith(".pdf") and ("FHM" in file_path.upper() or "GM" in file_path.upper()):
+                    full_pdf_path = os.path.join(full_dir_path, file_path)
+                    print(f"Caching PDF: {full_pdf_path}")
+                    corp_base64: str = pdf_process_main(
+                        pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)),
+                        temp_png_path=f"./test_img/{dir_path}/{os.path.splitext(os.path.basename(full_pdf_path))[0]}.png")
+                    CACHE_DATA_DICT[file_path] = cacheData(pdf_path=full_pdf_path, base64=corp_base64)
 
-    # 等待所有任务完成
-    wait(all_tasks, return_when=ALL_COMPLETED)
-    pool.shutdown()
+            # 构造线程池
+            pool = ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 1) * 5))
+            all_tasks = []
 
-    print(f"Total processing time: {time.time() - st_time} seconds")
+            for key, value in CACHE_DATA_DICT.items():
+                all_tasks.append(pool.submit(multi_thread_main, key, value))
+
+            # 等待所有任务完成
+            wait(all_tasks, return_when=ALL_COMPLETED)
+            pool.shutdown()
+
+            # 输出最终JSON文件
+            output_dict: dict = {}
+            for key, value in CACHE_DATA_DICT.items():
+                if value.extracted_json is None:
+                    print(f"[WARN] {key} 在 Excel 导出时 JSON 仍为 None，跳过。", flush=True)
+                    continue
+
+                output_dict[key] = value.extracted_json
+
+            with open(output_json_path, "w", encoding="utf-8") as f:
+                json.dump(output_dict, f, ensure_ascii=False, indent=2)
+
+            print(f"Output JSON saved to: {output_json_path}")
+
+            # export to excel
+            ws = wb.create_sheet(title=dir_path[:31])   # excel sheet title max length is 31
+            # add title
+            ws.append([f"防火门数据导出表 - {dir_path}"])
+            ws.append(["序号", "门型", "门编号", "洞口尺寸", "构件尺寸", "门框材质", "门扇材质", "门槛材质", "防火门芯",
+                       "玻璃", "门框密封条", "门扇密封条", "五金配置组", "名称", "品牌", "型号", "数量",
+                       "饰面颜色-推门侧", "饰面颜色-拉门侧"])
+
+            # merge and center the title row
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=19)
+            title_cell = ws.cell(row=1, column=1)
+            title_cell.alignment = styles.Alignment(horizontal='center', vertical='center')
+
+            serial: int = 0
+            for key, value in CACHE_DATA_DICT.items():
+                extracted_json: dict = value.extracted_json
+                hardware_list: list = extracted_json.get("五金配置", [])
+                max_hardware_count: int = max(1, len(hardware_list))
+
+                for i in range(max_hardware_count):
+                    if i == 0:
+                        serial += 1
+                        row_data = [str(serial), extracted_json.get("门型", ""), extracted_json.get("门编号", ""),
+                                    extracted_json.get("洞口尺寸", ""), extracted_json.get("构件尺寸", ""),
+                                    extracted_json.get("门框材质", ""), extracted_json.get("门扇材质", ""),
+                                    extracted_json.get("门槛材质", ""), extracted_json.get("防火门芯", ""),
+                                    extracted_json.get("玻璃", ""), extracted_json.get("门框密封条", ""),
+                                    extracted_json.get("门扇密封条", ""), extracted_json.get("五金配置组名称", ""),
+                                    hardware_list[i]["名称"] if i < len(hardware_list) else "",
+                                    hardware_list[i]["品牌"] if i < len(hardware_list) else "",
+                                    hardware_list[i]["型号"] if i < len(hardware_list) else "",
+                                    hardware_list[i]["数量"] if i < len(hardware_list) else "",
+                                    extracted_json.get("饰面颜色", {}).get("推门侧", ""),
+                                    extracted_json.get("饰面颜色", {}).get("拉门侧", "")]
+                    else:
+                        row_data = ["", "", "", "", "", "", "", "", "", "", "", "", "",
+                                    hardware_list[i]["名称"] if i < len(hardware_list) else "",
+                                    hardware_list[i]["品牌"] if i < len(hardware_list) else "",
+                                    hardware_list[i]["型号"] if i < len(hardware_list) else "",
+                                    hardware_list[i]["数量"] if i < len(hardware_list) else "", "", ""]
+                    ws.append(row_data)
+
+                # merge cells for non-hardware columns
+                if max_hardware_count > 1:
+                    for col_idx in range(1, 14):  # columns A to M (1 to 13)
+                        ws.merge_cells(start_row=ws.max_row - max_hardware_count + 1,
+                                       start_column=col_idx,
+                                       end_row=ws.max_row,
+                                       end_column=col_idx)
+                    for col_idx in range(18, 20):  # columns R to S (18 to 19)
+                        ws.merge_cells(start_row=ws.max_row - max_hardware_count + 1,
+                                       start_column=col_idx,
+                                       end_row=ws.max_row,
+                                       end_column=col_idx)
+
+            print(f"Excel sheet for {dir_path} done.", flush=True)
+
+    # remove default sheet
+    if 'Sheet' in wb.sheetnames:
+        wb.remove(wb['Sheet'])
+    wb.save(export_xlsx)
+    print(f"Exported Excel saved to: {export_xlsx}")

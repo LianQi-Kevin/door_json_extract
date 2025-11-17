@@ -4,3 +4,4 @@
 requests
 pymupdf
 urllib3
+openpyxl
