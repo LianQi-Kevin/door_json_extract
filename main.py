@@ -214,7 +214,8 @@ def multi_thread_main(cache_key: str, cache_data: cacheData):
 
 
 if __name__ == '__main__':
-    pdf_folder: str = r"your/pdf/path"
+    drawing_folder: str = r"your/pdf/path"
+    export_xlsx: str = r"./export.xlsx"
 
     wb = openpyxl.Workbook()
 
