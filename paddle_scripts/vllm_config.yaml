@@ -1,0 +1,8 @@
+# 单卡显存使用比例
+gpu-memory-utilization: 0.9
+# 上下文长度
+max-model-len: 8192
+# 强制启用eager模式
+#enforce-eager: True
+# 并发
+max-num-seqs: 16
