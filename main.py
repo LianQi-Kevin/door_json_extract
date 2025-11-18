@@ -252,6 +252,16 @@ def multi_thread_main(cache_key: str, cache_data: cacheData):
             CACHE_DATA_DICT[cache_key].extracted_json = {}
 
 
+# 递归获取文件夹下所有pdf文件的路径
+def get_pdf_filepath(base_path: str):
+    pdf_file_list: list[str] = []
+    for root, dirs, files in os.walk(base_path):
+        for file in files:
+            if file.lower().endswith('.pdf'):
+                pdf_file_list.append(os.path.join(root, file))
+    return pdf_file_list
+
+
 if __name__ == '__main__':
     drawing_folder: str = r"your/pdf/path"
     export_xlsx: str = r"./export.xlsx"
@@ -259,7 +269,7 @@ if __name__ == '__main__':
     wb = openpyxl.load_workbook(export_xlsx) if os.path.exists(export_xlsx) else openpyxl.Workbook()
 
     for dir_path in os.listdir(drawing_folder):
-        full_dir_path: str = os.path.join(drawing_folder, dir_path, "pdf")
+        full_dir_path: str = os.path.join(drawing_folder, dir_path)
         if os.path.isdir(full_dir_path):
             output_json_path: str = os.path.join(f"./cache_json", f"{dir_path}_extracted_fhm_data.json")
             os.makedirs("./cache_json", exist_ok=True)
@@ -275,14 +285,13 @@ if __name__ == '__main__':
             st_time = time.perf_counter()
 
             # preprocess pdf to cache data (pymupdf not support multi-thread)
-            for file_path in os.listdir(full_dir_path):
-                if file_path.endswith(".pdf") and ("FHM" in file_path.upper() or "GM" in file_path.upper()):
-                    full_pdf_path = os.path.join(full_dir_path, file_path)
-                    print(f"Caching PDF: {full_pdf_path}")
+            for pdf_path in get_pdf_filepath(full_dir_path):
+                if pdf_path.endswith(".pdf") and ("FHM" in pdf_path.upper() or "GM" in pdf_path.upper()):
+                    print(f"Caching PDF: {os.path.basename(pdf_path)}", flush=True)
                     corp_base64: str = pdf_process_main(
-                        pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)), dpi=150,
-                        temp_png_path=f"./test_img/{dir_path}/{os.path.splitext(os.path.basename(full_pdf_path))[0]}.png")
-                    CACHE_DATA_DICT[file_path] = cacheData(pdf_path=full_pdf_path, base64=corp_base64)
+                        pdf_path=pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)), dpi=150,
+                        temp_png_path=f"./test_img/{dir_path}/{os.path.splitext(os.path.basename(pdf_path))[0]}.png")
+                    CACHE_DATA_DICT[os.path.basename(pdf_path)] = cacheData(pdf_path=pdf_path, base64=corp_base64)
 
             # 构造线程池
             pool = ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 1) * 5))

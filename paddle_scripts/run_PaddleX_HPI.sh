@@ -32,4 +32,4 @@ source /root/autodl-tmp/paddlex-hpi/bin/activate
 # paddlex --get_pipeline_config PaddleOCR-VL
 
 # 6. Run PaddleOCR-VL pipeline
-paddlex --serve --pipeline /root/paddle_scripts/PaddleOCR-VL.yaml --host '127.0.0.1' --port 6006 --device gpu:0 --use_hpi --hpi_config
+paddlex --serve --pipeline /root/paddle_scripts/PaddleOCR-VL.yaml --host '127.0.0.1' --port 6006 --device gpu:0 --use_hpi

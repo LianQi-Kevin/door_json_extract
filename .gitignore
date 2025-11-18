@@ -210,6 +210,10 @@ __marimo__/
 .idea
 
 # cache
+test_img/*jpg
+test_img/*png
+test_img/*jpeg
+test_pdf/*pdf
 test_img/*/*jpg
 test_img/*/*png
 test_img/*/*jpeg
