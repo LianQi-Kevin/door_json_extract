@@ -2,16 +2,17 @@ import base64
 import json
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from typing import Optional
 from dataclasses import dataclass
 
 import pymupdf
 import openpyxl
-from openpyxl.styles.builtins import styles
-
-from requests_tools import post_with_retry
-
+import requests
+from openpyxl.styles import Alignment
+from requests.adapters import HTTPAdapter
+from urllib3 import Retry
 
 # PaddleOCR-VL 配置
 PADDLE_OCR_VL_DEPLOY_URL: str = r"http://your-paddle-ocr-vl-deploy-url:port"
@@ -35,6 +36,29 @@ CACHE_DATA_DICT: dict[str, cacheData] = {}
 
 # thread lock
 LOCK_1 = threading.Lock()
+_thread_local = threading.local()
+
+
+def get_session(proxies: Optional[dict[str, str]] = None, retry_times: int = 3,
+                retry_delay: int = 5) -> requests.Session:
+    # 如果当前线程尚未创建 Session，则新建并配置
+    if not hasattr(_thread_local, "session"):
+        session = requests.Session()
+        # 全局代理
+        if proxies:
+            session.proxies.update(proxies)
+        # 重试策略
+        retry = Retry(total=retry_times, backoff_factor=retry_delay, status_forcelist=[429, 500, 502, 503, 504],
+                      allowed_methods=["GET", "POST"], )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _thread_local.session = session
+    return _thread_local.session
+
+
+def post_with_retry(url, **kwargs):
+    return get_session().post(url, **kwargs)
 
 
 def paddle_ocr_vl(detection: str) -> str:
@@ -199,8 +223,23 @@ def multi_thread_main(cache_key: str, cache_data: cacheData):
     try:
         print(f"[THREAD] Start processing: {cache_key}", flush=True)
 
+        # ===== 计时：OCR 阶段 =====
+        t0_ocr = time.perf_counter()
         markdown_text: str = paddle_ocr_vl(detection=cache_data.base64)
+        t1_ocr = time.perf_counter()
+
+        # ===== 计时：GLM 阶段 =====
+        t0_glm = time.perf_counter()
         dumped_json: dict = big_model_completions(markdown_text=markdown_text)
+        t1_glm = time.perf_counter()
+
+        # ===== 打印单个任务的 profiling 结果 =====
+        ocr_cost = t1_ocr - t0_ocr
+        glm_cost = t1_glm - t0_glm
+        total_cost = t1_glm - t0_ocr
+        print(f"[PROF] key={cache_key} "
+              f"OCR={ocr_cost:.3f}s GLM={glm_cost:.3f}s TOTAL={total_cost:.3f}s", flush=True)
+
         print(f"[THREAD] JSON done for {cache_key}:\n{dumped_json}", flush=True)
 
         with LOCK_1:
@@ -217,7 +256,7 @@ if __name__ == '__main__':
     drawing_folder: str = r"your/pdf/path"
     export_xlsx: str = r"./export.xlsx"
 
-    wb = openpyxl.Workbook()
+    wb = openpyxl.load_workbook(export_xlsx) if os.path.exists(export_xlsx) else openpyxl.Workbook()
 
     for dir_path in os.listdir(drawing_folder):
         full_dir_path: str = os.path.join(drawing_folder, dir_path, "pdf")
@@ -232,18 +271,21 @@ if __name__ == '__main__':
             # create cache data
             os.makedirs(f"./test_img/{dir_path}", exist_ok=True)
 
+            # time tick
+            st_time = time.perf_counter()
+
             # preprocess pdf to cache data (pymupdf not support multi-thread)
             for file_path in os.listdir(full_dir_path):
                 if file_path.endswith(".pdf") and ("FHM" in file_path.upper() or "GM" in file_path.upper()):
                     full_pdf_path = os.path.join(full_dir_path, file_path)
                     print(f"Caching PDF: {full_pdf_path}")
                     corp_base64: str = pdf_process_main(
-                        pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)),
+                        pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)), dpi=150,
                         temp_png_path=f"./test_img/{dir_path}/{os.path.splitext(os.path.basename(full_pdf_path))[0]}.png")
                     CACHE_DATA_DICT[file_path] = cacheData(pdf_path=full_pdf_path, base64=corp_base64)
 
             # 构造线程池
-            pool = ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 1) * 5))
+            pool = ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 1) * 5))
             all_tasks = []
 
             for key, value in CACHE_DATA_DICT.items():
@@ -252,6 +294,10 @@ if __name__ == '__main__':
             # 等待所有任务完成
             wait(all_tasks, return_when=ALL_COMPLETED)
             pool.shutdown()
+
+            # time tick
+            ed_time = time.perf_counter()
+            print(f"All tasks completed in {ed_time - st_time:.3f} seconds.", flush=True)
 
             # 输出最终JSON文件
             output_dict: dict = {}
@@ -278,7 +324,7 @@ if __name__ == '__main__':
             # merge and center the title row
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=19)
             title_cell = ws.cell(row=1, column=1)
-            title_cell.alignment = styles.Alignment(horizontal='center', vertical='center')
+            title_cell.alignment = Alignment(horizontal='center', vertical='center')
 
             serial: int = 0
             for key, value in CACHE_DATA_DICT.items():

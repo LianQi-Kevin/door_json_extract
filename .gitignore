@@ -214,3 +214,5 @@ test_img/*/*jpg
 test_img/*/*png
 test_img/*/*jpeg
 test_pdf/*/*pdf
+cache_json/*.json
+export.xlsx
