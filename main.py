@@ -285,13 +285,13 @@ if __name__ == '__main__':
             st_time = time.perf_counter()
 
             # preprocess pdf to cache data (pymupdf not support multi-thread)
-            for pdf_path in get_pdf_filepath(full_dir_path):
-                if pdf_path.endswith(".pdf") and ("FHM" in pdf_path.upper() or "GM" in pdf_path.upper()):
-                    print(f"Caching PDF: {os.path.basename(pdf_path)}", flush=True)
+            for full_pdf_path in get_pdf_filepath(full_dir_path):
+                if full_pdf_path.endswith(".pdf") and ("FHM" in full_pdf_path.upper() or "GM" in full_pdf_path.upper()):
+                    print(f"Caching PDF: {os.path.basename(full_pdf_path)}", flush=True)
                     corp_base64: str = pdf_process_main(
-                        pdf_path=pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)), dpi=150,
-                        temp_png_path=f"./test_img/{dir_path}/{os.path.splitext(os.path.basename(pdf_path))[0]}.png")
-                    CACHE_DATA_DICT[os.path.basename(pdf_path)] = cacheData(pdf_path=pdf_path, base64=corp_base64)
+                        pdf_path=full_pdf_path, roi_shape=((0.6, 0.55), (0.85, 1.0)), dpi=150,
+                        temp_png_path=f"./test_img/{dir_path}/{os.path.splitext(os.path.basename(full_pdf_path))[0]}.png")
+                    CACHE_DATA_DICT[os.path.basename(full_pdf_path)] = cacheData(pdf_path=full_pdf_path, base64=corp_base64)
 
             # 构造线程池
             pool = ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 1) * 5))
