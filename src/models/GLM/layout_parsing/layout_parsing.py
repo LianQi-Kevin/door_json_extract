@@ -11,13 +11,14 @@ def layout_parsing(api_key: str, file: str, *, return_crop_images: bool = False,
     """https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E6%96%87%E6%A1%A3%E8%A7%A3%E6%9E%90"""
 
     def _postprocess(json_raw: dict) -> LayoutParsing:
+        # todo: 待修改为 chat_completion 的手动解析格式
         response_object = LayoutParsing(**json_raw)
         response_object.layout_details = [[LayoutDetail(**item) for item in page] for page in json_raw["layout_details"]]
         response_object.data_info = DataInfo(**json_raw["data_info"])
         response_object.usage = Usage(**json_raw["usage"])
         return response_object
 
-    request_url = f"{config.base_url}/paas/v4/layout_parsing"
+    request_url: str = rf"{config.base_url}/paas/v4/layout_parsing"
     header: dict = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"

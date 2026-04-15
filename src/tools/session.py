@@ -13,7 +13,7 @@ def get_session() -> requests.Session:
     if not hasattr(_thread_local, "session"):
         session = requests.Session()
         retry = Retry(
-            total=3,
+            total=5,
             backoff_factor=5,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET", "POST"],

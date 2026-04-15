@@ -77,25 +77,25 @@ class ResponseChoice:
 
 @dataclass
 class ResponseVideoResult:
-    url: str
-    cover_image_url: str
+    url: Optional[str]
+    cover_image_url: Optional[str]
 
 
 @dataclass
 class ResponseWebSearch:
-    icon: str
-    title: str
-    link: str
-    media: str
-    publish_date: str
-    content: str
-    refer: str
+    icon: Optional[str]
+    title: Optional[str]
+    link: Optional[str]
+    media: Optional[str]
+    publish_date: Optional[str]
+    content: Optional[str]
+    refer: Optional[str]
 
 
 @dataclass
 class ResponseContentFilter:
-    role: str
-    level: int
+    role: Optional[str]
+    level: Optional[int]
 
 
 @dataclass(slots=True)

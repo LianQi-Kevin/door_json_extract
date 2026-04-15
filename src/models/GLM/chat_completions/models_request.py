@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Literal, Union, Optional
+from typing import Literal, Union, Optional, Any, TypeAlias
 
 TaskModel = Literal[
     "glm-5.1", "glm-5-turbo", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-4.7-flashx", "glm-4.6",
@@ -32,26 +32,86 @@ class RequestMessageToolCall:
     id: str
     type: Literal["function", "web_search", "retrieval"]
     function: Optional[RequestMessageToolCallFunction] = None
-    tool_call_id: Optional[str] = None
 
 
 @dataclass
-class RequestMessage:
-    role: Literal["user", "system", "assistant", "tool"]
-    content: Optional[str] = None
+class RequestMessageBase:
+    role: Literal["system", "user"]
+    content: str
+
+
+@dataclass
+class RequestMessagAssistant(RequestMessageBase):
+    role: Literal["assistant"]
+    content: Optional[str]
     tool_calls: Optional[list[RequestMessageToolCall]] = None
 
 
+@dataclass
+class RequestMessagTool(RequestMessageBase):
+    role: Literal["tool"]
+    tool_call_id: Optional[str]
+
+
+@dataclass
+class Thinking:
+    type: Literal["enabled", "disabled"] = "enabled"
+    clear_thinking: bool = True
+
+
+@dataclass
+class ToolFunctionCallFunction:
+    name: str
+    description: str
+    parameters: Any     # JSON Schema
+
+
+@dataclass
+class ToolFunctionCall:
+    type: Literal["function"]
+    function: ToolFunctionCallFunction
+
+
+@dataclass
+class ToolRetrieval:
+    # todo: 暂时用不到, 未完成定义, unfinished
+    pass
+
+
+@dataclass
+class ToolWebSearc:
+    # todo: 暂时用不到, 未完成定义, unfinished
+    pass
+
+
+@dataclass
+class ToolMCP:
+    # todo: 暂时用不到, 未完成定义, unfinished
+    pass
+
+
+@dataclass
+class ResponseFormat:
+    type: Literal["text", "json_object"] = "text"
+
+
 @dataclass(slots=True)
-class Request:
-    model: Union[TaskModel, VisualizationModel, AudioModel, RolePlayModel] = "glm-5.1"
-    message: list[RequestMessage] = field(default_factory=list)
-    meta: Optional[RolePlayMeta] = None
-    stream: Optional[bool] = False
-    do_sample: Optional[bool] = True
-    temperature: Optional[float] = 0.8
-    top_p: Optional[float] = 0.6
-    max_tokens: Optional[int] = 1024
+class TaskRequest:
+    model: TaskModel
+    messages: list[Union[RequestMessageBase, RequestMessagAssistant, RequestMessagTool]]
+    stream: bool = False
+    thinking: Thinking = field(default_factory=Thinking)
+    do_sample: bool = True
+    temperature: float = 1.0
+    top_p: float = 0.95
+    max_tokens: Optional[int] = None
+    tool_stream: bool = False
+    tool: Optional[list[Union[ToolFunctionCall, ToolRetrieval, ToolWebSearc, ToolMCP]]] = None
+    tool_choice: Optional[Literal["auto"]] = None
     stop: Optional[list[str]] = None
+    response_format: Optional[ResponseFormat] = None
     request_id: Optional[str] = None
     user_id: Optional[str] = None
+
+
+Request: TypeAlias = TaskRequest
