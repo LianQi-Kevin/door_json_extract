@@ -1,7 +1,7 @@
-""" Step.3 - 反序列化 GLM 5.1 提取的 json 字串, 对于数据进行汇总 """
+""" Step.3 - 反序列化 GLM 5.1 的返回体, 序列化提取的 json 字串并写入到缓存文件内 """
 import logging
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional, cast
 
@@ -23,14 +23,14 @@ class FaceInfo:
     push: Optional[str] = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass
 class DoorInfoForm:
     name: str
     num: str
     hole_size: str
     face_info: FaceInfo
-    hardware: list[HardwareInfo]
-    component_size: Optional[str] = None
+    component_size: str
+    hardware: list[HardwareInfo] = field(default_factory=list)
     frame_material: Optional[str] = None
     leaf_material: Optional[str] = None
     threshold_material: Optional[str] = None
@@ -50,7 +50,7 @@ def json_loader(file: Path) -> DoorInfoForm:
         bill_name=json_dict.get("结算门型"),
         num=json_dict["门编号"],
         hole_size=json_dict["洞口尺寸"],
-        component_size=json_dict.get("构件尺寸"),
+        component_size=json_dict["构件尺寸"],
         frame_material=json_dict.get("门框材质"),
         leaf_material=json_dict.get("门扇材质"),
         threshold_material=json_dict.get("门槛材质"),
@@ -70,7 +70,10 @@ def json_loader(file: Path) -> DoorInfoForm:
 
 
 if __name__ == '__main__':
-    log_set(logging.DEBUG, log_save=True, save_level=logging.WARNING, save_path=config.log_dir / "3_json_to_xlsx.log")
+    log_set(logging.DEBUG, log_save=True, save_level=logging.WARNING, save_path=config.log_dir / "3_glm_json_resave.log")
 
-    for json_path in config.cache_json_hardware_dir.rglob("*.json"):
-        print(json_loader(json_path))
+    for json_path in config.cache_json_glm_response_dir.rglob("*.json"):
+        export_path = config.cache_json_hardware_dir / json_path.parent.name / json_path.name
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(export_path, "w", encoding="utf-8") as json_f:
+            json.dump(asdict(json_loader(json_path)), json_f, indent=4, ensure_ascii=False)

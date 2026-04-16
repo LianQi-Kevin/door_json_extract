@@ -166,7 +166,7 @@ def threading_main(md_result: str, json_path: Path):
         do_sample=False,
     )
     response = sync_chat_completions(config.glm_api_key, request_body)
-    export_path = config.cache_json_hardware_dir / json_path.parent.name / f"{json_path.stem}.json"
+    export_path = config.cache_json_glm_response_dir / json_path.parent.name / f"{json_path.stem}.json"
     logging.debug(f"finish request {json_path.parent.name}/{json_path.name}")
     export_path.parent.mkdir(parents=True, exist_ok=True)
     with open(export_path, "w", encoding="utf-8") as json_f:

@@ -3,3 +3,5 @@
 .cache
 log
 __pycache__
+
+skip_png.txt
