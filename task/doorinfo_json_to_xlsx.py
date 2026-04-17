@@ -87,7 +87,53 @@ def normalize_detail_df_by_rules(detail_df: pd.DataFrame, rules: Optional[list[d
     return result
 
 
-def build_hardware_detail_df(items: list[PathDoorInfo], rules: Optional[list[dict]] = None) -> pd.DataFrame:
+def attach_detail_df_by_rules(detail_df: pd.DataFrame, rules: Optional[list[dict]] = None) -> pd.DataFrame:
+    """
+    根据 rules 给 detail_df 附加字段
+
+    rules 格式示例:
+    [{
+        "match": {"五金材料名称": "欧标合页", "规格型号": "4.5x4x3"},
+        "attach": {"单位": "片", "导出分组": "合页类"},
+    }]
+
+    规则含义:
+    - match: 命中的条件，多个列时按 AND 处理
+    - attach: 命中后要附加/写入的列和值
+    """
+    if detail_df.empty or not rules:
+        return detail_df.copy()
+
+    result = detail_df.copy()
+
+    for rule in rules:
+        match = rule.get("match", {})
+        attach = rule.get("attach", {})
+
+        if not match or not attach:
+            continue
+
+        mask = pd.Series(True, index=result.index)
+
+        for col, expected_value in match.items():
+            if col not in result.columns:
+                mask &= False
+                break
+            mask &= result[col].eq(expected_value)
+
+        if not mask.any():
+            continue
+
+        for col, new_value in attach.items():
+            if col not in result.columns:
+                result[col] = ""
+            result.loc[mask, col] = new_value
+
+    return result
+
+
+def build_hardware_detail_df(items: list[PathDoorInfo], rules: Optional[list[dict]] = None,
+                             attach_rules: Optional[list[dict]] = None) -> pd.DataFrame:
     """ 把 list[PathDoorInfo] 展开为五金明细 DataFrame """
     def _safe_str(string: Optional[str]) -> str:
         if isinstance(string, str):
@@ -119,6 +165,7 @@ def build_hardware_detail_df(items: list[PathDoorInfo], rules: Optional[list[dic
                                              "五金材料名称", "厂家", "规格型号", "表格数量", "汇总数量"])
     _detail_df = normalize_detail_df_by_rules(_detail_df, rules)
     _detail_df = normalize_detail_df_by_special_cases(_detail_df)
+    _detail_df = attach_detail_df_by_rules(_detail_df, attach_rules)
     _detail_df = _detail_df.sort_values(by=["五金材料名称", "规格型号", "图包名称", "图纸名称", "门型"],
                                         kind="stable").reset_index(drop=True)
     return _detail_df
@@ -177,9 +224,9 @@ def door_info_reloader(file: Path) -> DoorInfoForm:
     return result
 
 
-def df_builder_main(items: list[PathDoorInfo], rules: Optional[list[dict]] = None) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-    # 构造明细表
-    detail_dataframe = build_hardware_detail_df(items, rules=rules)
+def df_builder_main(items: list[PathDoorInfo], rules: Optional[list[dict]] = None,
+                    attach_rules: Optional[list[dict]] = None) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:    # 构造明细表
+    detail_dataframe = build_hardware_detail_df(items, rules=rules, attach_rules=attach_rules)
 
     # 清理所有数量为 0 的五金项
     detail_dataframe = detail_dataframe[detail_dataframe["汇总数量"].gt(0)].copy()
@@ -436,12 +483,44 @@ if __name__ == '__main__':
         {"match": {"五金材料名称": "明装电磁闭门器"}, "update": {"五金材料名称": "电磁闭门器", "规格型号": ""}},
         {"match": {"五金材料名称": "电磁停门闭门器"}, "update": {"五金材料名称": "电磁闭门器", "规格型号": ""}},
         {"match": {"五金材料名称": "电磁门吸"}, "update": {"五金材料名称": "电磁闭门器", "规格型号": ""}},
+
+        {"match": {"五金材料名称": "推杠锁上锁扣下调支架"}, "update": {"五金材料名称": "顺位器支架"}},
     ]
 
     rename_rules.extend(rename_rules_2)
+
+    attach_rules: list[dict[str, dict[str, str]]] = [
+        {"match": {"五金材料名称": "入户门电子锁"}, "attach": {"单位": "套"}},
+        {"match": {"五金材料名称": "单门磁力锁"}, "attach": {"单位": "套"}},
+        {"match": {"五金材料名称": "国标双舌锁"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "国标固舌锁"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "国标闭门器"}, "attach": {"单位": "台"}},
+        {"match": {"五金材料名称": "手动暗插销"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "推拉手板"}, "attach": {"单位": "付"}},
+        {"match": {"五金材料名称": "顺位器支架"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "暗拉环"}, "attach": {"单位": "付"}},
+        {"match": {"五金材料名称": "欧标双舌锁"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "欧标合页"}, "attach": {"单位": "片"}},
+        {"match": {"五金材料名称": "欧标固舌锁"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "欧标通道功能锁"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "欧标闭门器"}, "attach": {"单位": "台"}},
+        {"match": {"五金材料名称": "电控逃生装置+外侧执手"}, "attach": {"单位": "套"}},
+        {"match": {"五金材料名称": "电插锁"}, "attach": {"单位": "套"}},
+        {"match": {"五金材料名称": "电磁闭门器"}, "attach": {"单位": "台"}},
+        {"match": {"五金材料名称": "美标上下杆式逃生装置"}, "attach": {"单位": "套"}},
+        {"match": {"五金材料名称": "美标插芯式逃生装置+外侧执手"}, "attach": {"单位": "套"}},
+        {"match": {"五金材料名称": "美标机电一体锁"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "美标闭门器"}, "attach": {"单位": "套"}},
+        {"match": {"五金材料名称": "过线器"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "重力顺位器"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "门止"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "防尘筒"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "隐藏式顺位器"}, "attach": {"单位": "根"}},
+        {"match": {"五金材料名称": "顺位器"}, "attach": {"单位": "个"}},
+    ]
 
     # get xlsx write-use item
     # summary_df, detail_dict = df_builder_main(door_metadata_list, rename_rules)
 
     # write xlsx
-    write_xlsx(Path("door_hardware.xlsx"), *df_builder_main(door_metadata_list, rename_rules))
+    # write_xlsx(Path("door_hardware.xlsx"), *df_builder_main(door_metadata_list, rename_rules))
