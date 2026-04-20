@@ -1,4 +1,4 @@
-""" Step.3 - 反序列化 DoorInfoForm json 字串并写出到 xlsx """
+""" Step.3 - 反序列化 DoorInfoForm json 字串并写出到 <config.cache_dir> /  """
 import json
 import logging
 import re
@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Optional, cast
 
 import pandas as pd
-from openpyxl.utils import get_column_letter
 
 from config import config
 from glm_json_resave import DoorInfoForm, HardwareInfo, FaceInfo
 from src.tools.logging_utils import log_set
+
+
+DETAIL_PARQUET_PATH = config.cache_dir / "door_hardware_detail.parquet"
 
 
 @dataclass
@@ -132,7 +134,7 @@ def attach_detail_df_by_rules(detail_df: pd.DataFrame, rules: Optional[list[dict
     return result
 
 
-def build_hardware_detail_df(items: list[PathDoorInfo], rules: Optional[list[dict]] = None,
+def build_hardware_detail_df(items: list[PathDoorInfo], rename_rules: Optional[list[dict]] = None,
                              attach_rules: Optional[list[dict]] = None) -> pd.DataFrame:
     """ 把 list[PathDoorInfo] 展开为五金明细 DataFrame """
     def _safe_str(string: Optional[str]) -> str:
@@ -163,7 +165,7 @@ def build_hardware_detail_df(items: list[PathDoorInfo], rules: Optional[list[dic
 
     _detail_df = pd.DataFrame(rows, columns=["图包名称", "图纸名称", "门型", "门编号", "洞口尺寸", "构件尺寸", "樘数",
                                              "五金材料名称", "厂家", "规格型号", "表格数量", "汇总数量"])
-    _detail_df = normalize_detail_df_by_rules(_detail_df, rules)
+    _detail_df = normalize_detail_df_by_rules(_detail_df, rename_rules)
     _detail_df = normalize_detail_df_by_special_cases(_detail_df)
     _detail_df = attach_detail_df_by_rules(_detail_df, attach_rules)
     _detail_df = _detail_df.sort_values(by=["五金材料名称", "规格型号", "图包名称", "图纸名称", "门型"],
@@ -189,30 +191,28 @@ def normalize_detail_df_by_special_cases(detail_df: pd.DataFrame) -> pd.DataFram
     return result
 
 
-def build_summary_df(detail_df: pd.DataFrame) -> pd.DataFrame:
-    """ 基于明细表生成汇总表，按材料名称和规格型号汇总 """
-    _summary_df = (
-        detail_df.groupby(["五金材料名称", "规格型号"], dropna=False, as_index=False)
-        .agg(数量=("汇总数量", "sum"))
-        .rename(columns={"五金材料名称": "材料名称"})
-        .sort_values(by=["材料名称", "规格型号"], kind="stable")
-        .reset_index(drop=True)
-    )
+def save_detail_parquet(items: list[PathDoorInfo], *, rename_rule: Optional[list[dict]] = None,
+                        attach_rule: Optional[list[dict]] = None) -> pd.DataFrame:
+    """ 写出到 DETAIL_PARQUET_PATH 作为中间层, 解耦 summary 和 datail """
+    detail_df = build_hardware_detail_df(items, rename_rules=rename_rule, attach_rules=attach_rule)
+    detail_df = detail_df[detail_df["汇总数量"].gt(0)].copy()
 
-    _summary_df.insert(0, "序号", _summary_df.index + 1)
-    return _summary_df[["序号", "材料名称", "规格型号", "数量"]]
+    if "单位" not in detail_df.columns:
+        detail_df["单位"] = ""
+
+    detail_df = (detail_df[
+        ["图包名称", "图纸名称", "门型", "门编号", "洞口尺寸", "构件尺寸", "樘数", "五金材料名称", "厂家", "规格型号", "单位",
+         "表格数量", "汇总数量"]
+    ].sort_values(
+        by=["五金材料名称", "规格型号", "图包名称", "图纸名称", "门型", "门编号"], kind="stable", ).reset_index(drop=True))
+
+    DETAIL_PARQUET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    detail_df.to_parquet(DETAIL_PARQUET_PATH, engine="pyarrow", compression="snappy", index=False)
+    return detail_df
 
 
-def build_material_detail_df_map(detail_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """ 按五金材料名称拆分明细表 """
-    result: dict[str, pd.DataFrame] = {}
-
-    for material_name, group_df in detail_df.groupby("五金材料名称", sort=False):
-        sub_df = group_df.reset_index(drop=True).copy()
-        sub_df.insert(0, "序号", sub_df.index + 1)
-        result[cast(str, material_name)] = sub_df
-
-    return result
+def load_detail_parquet() -> pd.DataFrame:
+    return pd.read_parquet(DETAIL_PARQUET_PATH, engine="pyarrow")
 
 
 def door_info_reloader(file: Path) -> DoorInfoForm:
@@ -224,75 +224,8 @@ def door_info_reloader(file: Path) -> DoorInfoForm:
     return result
 
 
-def df_builder_main(items: list[PathDoorInfo], rules: Optional[list[dict]] = None,
-                    attach_rules: Optional[list[dict]] = None) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:    # 构造明细表
-    detail_dataframe = build_hardware_detail_df(items, rules=rules, attach_rules=attach_rules)
-
-    # 清理所有数量为 0 的五金项
-    detail_dataframe = detail_dataframe[detail_dataframe["汇总数量"].gt(0)].copy()
-
-    # 构造汇总表
-    # summary_df = build_summary_df(detail_dataframe)
-
-    # 手动筛选检查
-    # matched_df = detail_dataframe[detail_dataframe["五金材料名称"].str.contains("顺位器", na=False)]
-    # matched_df = summary_df[summary_df["规格型号"].eq("")]
-
-    # pprint(summary_df.to_dict(orient="records"))
-
-    # 根据材料名称拆分明细表
-    # detail_dict = build_material_detail_df_map(detail_dataframe)
-
-    return build_summary_df(detail_dataframe), build_material_detail_df_map(detail_dataframe)
-
-
-def set_worksheet_column_widths(ws, df: pd.DataFrame, col_widths: dict[str, float]) -> None:
-    """按列名设置 worksheet 列宽"""
-    for col_idx, col_name in enumerate(df.columns, start=1):
-        width = col_widths.get(col_name)
-        if width is None:
-            continue
-        col_letter = get_column_letter(col_idx)
-        ws.column_dimensions[col_letter].width = width
-
-
-def write_xlsx(output_file: Path, summary_df: pd.DataFrame, detail_dict: dict[str, pd.DataFrame]) -> None:
-    summary_col_widths = {
-        "序号": 8,
-        "材料名称": 30,
-        "规格型号": 25,
-        "数量": 10,
-    }
-
-    detail_col_widths = {
-        "序号": 8,
-        "图包名称": 60,
-        "图纸名称": 50,
-        "门型": 18,
-        "门编号": 18,
-        "洞口尺寸": 14,
-        "构件尺寸": 14,
-        "樘数": 8,
-        "五金材料名称": 14,
-        "厂家": 9,
-        "规格型号": 10,
-        "表格数量": 10,
-        "汇总数量": 10,
-    }
-
-    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="汇总表", index=False)
-        summary_ws = writer.sheets["汇总表"]
-        set_worksheet_column_widths(summary_ws, summary_df, summary_col_widths)
-
-        for material_name, detail_df in detail_dict.items():
-            detail_df.to_excel(writer, sheet_name=material_name, index=False)
-            detail_ws = writer.sheets[material_name]
-            set_worksheet_column_widths(detail_ws, detail_df, detail_col_widths)
-
-
 if __name__ == '__main__':
-    log_set(logging.DEBUG, log_save=True, save_level=logging.WARNING, save_path=config.log_dir / "4_json_to_xlsx.log")
+    log_set(logging.DEBUG, log_save=True, save_level=logging.WARNING, save_path=config.log_dir / "3_json_to_parquet.log")
 
     door_metadata_list: list[PathDoorInfo] = [
         PathDoorInfo(**vars(door_info_reloader(json_path)), file_path=json_path)
@@ -390,7 +323,7 @@ if __name__ == '__main__':
     door_metadata_list.extend(manual_metadata)
 
     # batch replace
-    rename_rules: list[dict[str, dict[str, str]]] = [
+    r_rules: list[dict[str, dict[str, str]]] = [
         {"match": {"规格型号": "DC 490"}, "update": {"规格型号": "DC490"}},
         {"match": {"五金材料名称": "欧标通道功能锁"}, "update": {"五金材料名称": "欧标通道锁"}},
         {"match": {"五金材料名称": "国标标执手锁"}, "update": {"五金材料名称": "国标执手锁"}},
@@ -415,7 +348,7 @@ if __name__ == '__main__':
     ]
 
     # 五金专业核对后调整映射原则
-    rename_rules_2: list[dict[str, dict[str, str]]] = [
+    r_rules_2: list[dict[str, dict[str, str]]] = [
         # 4.5x4x3
         {"match": {"五金材料名称": "国标轴承合页"}, "update": {"五金材料名称": "欧标合页", "规格型号": "4.5x4x3"}},
         {"match": {"五金材料名称": "欧标轴承合页"}, "update": {"五金材料名称": "欧标合页", "规格型号": "4.5x4x3"}},
@@ -487,9 +420,9 @@ if __name__ == '__main__':
         {"match": {"五金材料名称": "推杠锁上锁扣下调支架"}, "update": {"五金材料名称": "顺位器支架"}},
     ]
 
-    rename_rules.extend(rename_rules_2)
+    r_rules.extend(r_rules_2)
 
-    attach_rules: list[dict[str, dict[str, str]]] = [
+    a_rules: list[dict[str, dict[str, str]]] = [
         {"match": {"五金材料名称": "入户门电子锁"}, "attach": {"单位": "套"}},
         {"match": {"五金材料名称": "单门磁力锁"}, "attach": {"单位": "套"}},
         {"match": {"五金材料名称": "国标双舌锁"}, "attach": {"单位": "个"}},
@@ -517,10 +450,9 @@ if __name__ == '__main__':
         {"match": {"五金材料名称": "防尘筒"}, "attach": {"单位": "个"}},
         {"match": {"五金材料名称": "隐藏式顺位器"}, "attach": {"单位": "根"}},
         {"match": {"五金材料名称": "顺位器"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "防火防盗锁"}, "attach": {"单位": "个"}},
+        {"match": {"五金材料名称": "防盗锁（B级）"}, "attach": {"单位": "个"}},
     ]
 
-    # get xlsx write-use item
-    # summary_df, detail_dict = df_builder_main(door_metadata_list, rename_rules)
-
-    # write xlsx
-    # write_xlsx(Path("door_hardware.xlsx"), *df_builder_main(door_metadata_list, rename_rules))
+    # save cache
+    save_detail_parquet(door_metadata_list, rename_rule=r_rules, attach_rule=a_rules)

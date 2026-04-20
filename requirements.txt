@@ -6,4 +6,4 @@ pymupdf
 urllib3
 openpyxl
 python-docx
-pandas[excel]
+pandas[excel, parquet, feather]

@@ -5,11 +5,14 @@ from dataclasses import dataclass, field
 @dataclass(slots=True)
 class Config:
     # cache dir
-    cache_dir: Path = Path(".cache")
+    cache_dir: Path = Path(".cache").resolve()
     cache_png_dir: Path = field(init=False)
     cache_json_ocr_dir: Path = field(init=False)
     cache_json_hardware_dir: Path = field(init=False)
     cache_json_glm_response_dir: Path = field(init=False)
+
+    # resources
+    resources_dir: Path = Path("resources").resolve()
 
     # log dir
     log_dir: Path = Path("./log")
